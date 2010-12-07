@@ -1,6 +1,7 @@
 #include <cmath>
 #include <ctime>
 #include <cstdio>
+#include <cassert>
 #include <vector>
 #include <map>
 
@@ -288,7 +289,7 @@ bool render_signed_distance_font(
 {
 	std::map<int, int> char_map;
 	std::vector<int> render_list;
-	
+
 	if( map_file != NULL )
 	{
 		printf( "Loading character mapping file: '%s'\n", map_file );
@@ -299,7 +300,7 @@ bool render_signed_distance_font(
 			printf( "Failed to open: '%s'\n", map_file );
 			return false;
 		}
-		
+
 		char line[80];
 		while( fgets(line, 80, f) != NULL)
 		{
@@ -309,15 +310,15 @@ bool render_signed_distance_font(
 			if( sscanf(line, "%x\t%x", &c, &u) != 2 ) printf("skip: %s", line);
 			else char_map[u] = c;
 		}
-		
+
 		fclose(f);
-		
+
 		for(std::map<int, int>::const_iterator i = char_map.begin(), e = char_map.end(); i != e; ++i )
 		{
 			render_list.push_back( i->first );
 		}
 	}
-	
+
 	FT_Face ft_face;
 	int ft_err = FT_New_Face( ft_lib, font_file, 0, &ft_face );
 	if( ft_err )
@@ -325,7 +326,7 @@ bool render_signed_distance_font(
 		printf( "Failed to read the font file '%s'\n", font_file );
 		return false;
 	}
-	
+
 	if (render_list.size() == 0)
 	{
 		printf( "Font to convert to a Signed Distance Field:\n%s\n\n", font_file );
@@ -396,70 +397,67 @@ bool render_signed_distance_font(
 
 	//	render all the glyphs individually
 	printf( "\nRendering characters into a packed %i^2 image:\n", texture_size );
-	int packed_glyph_index = 0;
 	int tin = clock();
+	int packed_glyph_index = 0;
 	for( unsigned int char_index = 0; char_index < render_list.size(); ++char_index )
 	{
-		int glyph_index = FT_Get_Char_Index( ft_face, render_list[char_index] );
-		if( glyph_index )
+		int char_id = render_list[char_index];
+		int glyph_index = FT_Get_Char_Index( ft_face, char_id );
+		if( glyph_index == 0 ||
+			FT_Load_Glyph( ft_face, glyph_index, 0 ) ||
+			FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO ) )
 		{
-			ft_err = FT_Load_Glyph( ft_face, glyph_index, 0 );
-			if( !ft_err )
+			continue;
+		}
+
+		assert(all_glyphs[packed_glyph_index].ID == char_id);
+		
+		int w = ft_face->glyph->bitmap.width;
+		int h = ft_face->glyph->bitmap.rows;
+		int p = ft_face->glyph->bitmap.pitch;
+
+		//	oversize the holding buffer so I can smooth it!
+		int sw = w + scaler * 8; // * 4;
+		int sh = h + scaler * 8; // * 4;
+		unsigned char smooth_buf[sw * sh];
+		for( int i = 0; i < sw * sh; ++i )
+		{
+			smooth_buf[i] = 0;
+		}
+
+		//	copy the glyph into the buffer to be smoothed
+		unsigned char * buf = ft_face->glyph->bitmap.buffer;
+		for( int j = 0; j < h; ++j )
+		{
+			for( int i = 0; i < w; ++i )
 			{
-				ft_err = FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO );
-				if( !ft_err )
-				{
-					//	we have the glyph, already rendered, get the data about it
-					int w = ft_face->glyph->bitmap.width;
-					int h = ft_face->glyph->bitmap.rows;
-					int p = ft_face->glyph->bitmap.pitch;
-
-					//	oversize the holding buffer so I can smooth it!
-					int sw = w + scaler * 4;
-					int sh = h + scaler * 4;
-					unsigned char *smooth_buf = new unsigned char[sw*sh];
-					for( int i = 0; i < sw*sh; ++i )
-					{
-						smooth_buf[i] = 0;
-					}
-
-					//	copy the glyph into the buffer to be smoothed
-					unsigned char *buf = ft_face->glyph->bitmap.buffer;
-					for( int j = 0; j < h; ++j )
-					{
-						for( int i = 0; i < w; ++i )
-						{
-							smooth_buf[scaler*2+i+(j+scaler*2)*sw] = 255 * ((buf[j*p+(i>>3)] >> (7 - (i & 7))) & 1);
-						}
-					}
-					//	do the SDF
-					int sdfw = all_glyphs[packed_glyph_index].width;
-					int sdfx = all_glyphs[packed_glyph_index].x;
-					int sdfh = all_glyphs[packed_glyph_index].height;
-					int sdfy = all_glyphs[packed_glyph_index].y;
-					for( int j = 0; j < sdfh; ++j )
-					{
-						for( int i = 0; i < sdfw; ++i )
-						{
-							int pd_idx = (i+sdfx+(j+sdfy)*texture_size) * 4;
-							pdata[pd_idx] =
-								//get_SDF
-								get_SDF_radial
-										( smooth_buf, sw, sh,
-										i*scaler + (scaler >>1), j*scaler + (scaler >>1),
-										2*scaler );
-							pdata[pd_idx+1] = pdata[pd_idx];
-							pdata[pd_idx+2] = pdata[pd_idx];
-							pdata[pd_idx+3] = pdata[pd_idx];
-						}
-					}
-					++packed_glyph_index;
-
-					delete [] smooth_buf;
-				}
-				printf( "%i ", render_list[char_index] );
+				int value = 255 * ((buf[j * p + (i>>3)] >> (7 - (i & 7))) & 1);
+				smooth_buf[i + scaler*2 + (j + scaler*2) * sw] = value;
 			}
 		}
+
+		//	do the SDF
+		int sdfw = all_glyphs[packed_glyph_index].width;
+		int sdfx = all_glyphs[packed_glyph_index].x;
+		int sdfh = all_glyphs[packed_glyph_index].height;
+		int sdfy = all_glyphs[packed_glyph_index].y;
+		for( int j = 0; j < sdfh; ++j )
+		{
+			for( int i = 0; i < sdfw; ++i )
+			{
+				int pd_idx = (i+sdfx+(j+sdfy)*texture_size) * 4;
+				pdata[pd_idx] =
+					//get_SDF
+					get_SDF_radial
+							( smooth_buf, sw, sh,
+							i*scaler + (scaler/2), j*scaler + (scaler/2),
+							2*scaler );
+				pdata[pd_idx+1] = pdata[pd_idx];
+				pdata[pd_idx+2] = pdata[pd_idx];
+				pdata[pd_idx+3] = pdata[pd_idx];
+			}
+		}
+		++packed_glyph_index;
 	}
 	tin = clock() - tin;
 	printf( "\nRenderint took %1.3f seconds\n\n", 0.001f * tin );
@@ -681,60 +679,53 @@ bool gen_pack_list(
 		const std::vector< int > &render_list,
 		std::vector< sdf_glyph > &packed_glyphs )
 {
-	//const int glyph_padding = 0;//(pixel_size / 16) > 1 ? (pixel_size / 16) : 1;
-	//printf("padding: %i\n", glyph_padding);
-	
 	int ft_err;
 	packed_glyphs.clear();
-	ft_err = FT_Set_Pixel_Sizes( ft_face, pixel_size*scaler, 0 );
+	ft_err = FT_Set_Pixel_Sizes( ft_face, pixel_size * scaler, 0 );
 	
 	std::vector< int > rectangle_info;
 	std::vector< std::vector<int> > packed_glyph_info;
 	for( unsigned int char_index = 0; char_index < render_list.size(); ++char_index )
 	{
-		int glyph_index = FT_Get_Char_Index( ft_face, render_list[char_index] );
-		if( glyph_index )
+		int char_id = render_list[char_index];
+		int glyph_index = FT_Get_Char_Index( ft_face, char_id );
+		if( glyph_index == 0 ||
+			FT_Load_Glyph( ft_face, glyph_index, 0 ) || 
+			FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO ) )
 		{
-			ft_err = FT_Load_Glyph( ft_face, glyph_index, 0 );
-			if( !ft_err )
-			{
-
-				ft_err = FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO );
-				if( !ft_err )
-				{
-					sdf_glyph add_me;
-					//	we have the glyph, already rendered, get the data about it
-					int w = ft_face->glyph->bitmap.width;
-					int h = ft_face->glyph->bitmap.rows;
-					//	oversize the holding buffer so I can smooth it!
-					int sw = w + scaler * 4;
-					int sh = h + scaler * 4;
-					//	do the SDF
-					int sdfw = sw / scaler;
-					int sdfh = sh / scaler;
-					rectangle_info.push_back( sdfw );
-					rectangle_info.push_back( sdfh );
-					//	add in the data I already know
-					add_me.ID = render_list[char_index];
-					add_me.width = sdfw;
-					add_me.height = sdfh;
-					//	these need to be filled in later (after packing)
-					add_me.x = -1;
-					add_me.y = -1;
-					//	these need scaling...
-					add_me.xoff = ft_face->glyph->bitmap_left;
-					add_me.yoff = ft_face->glyph->bitmap_top;
-					add_me.xadv = ft_face->glyph->advance.x / 64.0;
-					//	so scale them (the 1.5's have to do with the padding
-					//	border and the sampling locations for the SDF)
-					add_me.xoff = add_me.xoff / scaler - 1.5;
-					add_me.yoff = add_me.yoff / scaler + 1.5;
-					add_me.xadv = add_me.xadv / scaler;
-					//	add it to my list
-					packed_glyphs.push_back( add_me );
-				}
-			}
+			continue;
 		}
+
+		sdf_glyph add_me;
+		//	we have the glyph, already rendered, get the data about it
+		int w = ft_face->glyph->bitmap.width;
+		int h = ft_face->glyph->bitmap.rows;
+		//	oversize the holding buffer so I can smooth it!
+		int sw = w + scaler * 8; // * 4;
+		int sh = h + scaler * 8; // * 4
+		//	do the SDF
+		int sdfw = sw / scaler;
+		int sdfh = sh / scaler;
+		rectangle_info.push_back( sdfw );
+		rectangle_info.push_back( sdfh );
+		//	add in the data I already know
+		add_me.ID = render_list[char_index];
+		add_me.width = sdfw;
+		add_me.height = sdfh;
+		//	these need to be filled in later (after packing)
+		add_me.x = -1;
+		add_me.y = -1;
+		//	these need scaling...
+		add_me.xoff = ft_face->glyph->bitmap_left;
+		add_me.yoff = ft_face->glyph->bitmap_top;
+		add_me.xadv = ft_face->glyph->advance.x / 64.0;
+		//	so scale them (the 1.5's have to do with the padding
+		//	border and the sampling locations for the SDF)
+		add_me.xoff = add_me.xoff / scaler - 3; // - 1.5;
+		add_me.yoff = add_me.yoff / scaler + 3; // + 1.5;
+		add_me.xadv = add_me.xadv / scaler;
+		//	add it to my list
+		packed_glyphs.push_back( add_me );
 	}
 	
 	const bool dont_allow_rotation = false;
@@ -749,8 +740,8 @@ bool gen_pack_list(
 		{
 			//	index, x, y, rotated
 			unsigned int idx = packed_glyph_info[0][i+0];
-			packed_glyphs[idx].x = packed_glyph_info[0][i+1];// + glyph_padding;
-			packed_glyphs[idx].y = packed_glyph_info[0][i+2];// + glyph_padding;
+			packed_glyphs[idx].x = packed_glyph_info[0][i+1];
+			packed_glyphs[idx].y = packed_glyph_info[0][i+2];
 		}
 		return true;
 	}
