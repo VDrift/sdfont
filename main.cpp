@@ -537,7 +537,8 @@ int save_png_SDFont(
 	{
 		fprintf( fp, "info face=\"%s\"\n", font_name  );
 		fprintf( fp, "size=%i\n", font_size );
-		fprintf( fp, "line_height=%2.0f\n", ymax - ymin );
+		fprintf( fp, "ascent=%2.0f\n", ymax );
+		fprintf( fp, "descent=%2.0f\n", ymin );
 		fprintf( fp, "chars count=%zu\n", packed_glyphs.size() );
 		for( unsigned int i = 0; i < packed_glyphs.size(); ++i )
 		{		
