@@ -2,6 +2,7 @@
 #include <ctime>
 #include <cstdio>
 #include <vector>
+#include <map>
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -25,6 +26,7 @@ struct sdf_glyph
 bool render_signed_distance_font(
 		FT_Library &ft_lib,
 		const char* font_file,
+		const char* map_file,
 		int texture_size,
 		bool export_c_header );
 
@@ -51,7 +53,9 @@ int save_png_SDFont(
 		const char* font_name,
 		int img_width, int img_height,
 		const std::vector< unsigned char > &img_data,
-		const std::vector< sdf_glyph > &packed_glyphs );
+		std::vector< sdf_glyph > &packed_glyphs,
+		const std::map<int, int> & char_map,
+		int font_size );
 
 int save_c_header_SDFont(
 		const char* orig_filename,
@@ -107,19 +111,17 @@ int main( int argc, char **argv )
 		return -1;
 	}
 
-	for( int font_input_idx = 1; font_input_idx < argc; ++font_input_idx )
+	//	this may be either an image, or a font file, try the image first
+	if( !render_signed_distance_image( argv[1], texture_size, export_c_header ) )
 	{
-		//	this may be either an image, or a font file, try the image first
-		if( !render_signed_distance_image( argv[font_input_idx], texture_size, export_c_header ) )
-		{
-			//	didn't work, try the font
-			render_signed_distance_font( ft_lib, argv[font_input_idx], texture_size, export_c_header );
-		}
+		//	didn't work, try the font
+		const char * map_file = (argc == 3) ? argv[2] : NULL;
+		render_signed_distance_font( ft_lib, argv[1], map_file, texture_size, export_c_header );
 	}
 
 	ft_err = FT_Done_FreeType( ft_lib );
 
-	system( "pause" );
+	//system( "pause" );
     return 0;
 }
 
@@ -280,16 +282,51 @@ bool render_signed_distance_image(
 bool render_signed_distance_font(
 		FT_Library &ft_lib,
 		const char* font_file,
+		const char* map_file,
 		int texture_size,
 		bool export_c_header )
 {
+	std::map<int, int> char_map;
+	std::vector<int> render_list;
+	
+	if( map_file != NULL )
+	{
+		printf( "Loading character mapping file: '%s'\n", map_file );
+		FILE * f = NULL;
+		f = fopen( map_file, "r" );
+		if( f == NULL )
+		{ 
+			printf( "Failed to open: '%s'\n", map_file );
+			return false;
+		}
+		
+		char line[80];
+		while( fgets(line, 80, f) != NULL)
+		{
+			if (line[0] != '0') continue;
+			
+			int c = 0, u = 0;
+			if( sscanf(line, "%x\t%x", &c, &u) != 2 ) printf("skip: %s", line);
+			else char_map[u] = c;
+		}
+		
+		fclose(f);
+		
+		for(std::map<int, int>::const_iterator i = char_map.begin(), e = char_map.end(); i != e; ++i )
+		{
+			render_list.push_back( i->first );
+		}
+	}
+	
 	FT_Face ft_face;
 	int ft_err = FT_New_Face( ft_lib, font_file, 0, &ft_face );
 	if( ft_err )
 	{
 		printf( "Failed to read the font file '%s'\n", font_file );
 		return false;
-	} else
+	}
+	
+	if (render_list.size() == 0)
 	{
 		printf( "Font to convert to a Signed Distance Field:\n%s\n\n", font_file );
 		int max_unicode_char= 0;
@@ -305,151 +342,150 @@ bool render_signed_distance_font(
 		}
 		if( max_unicode_char < 1 ) { max_unicode_char = 1; }
 		//	Try all characters up to a user selected value (it will auto-skip any without glyphs)
-		std::vector< int > render_list;
 		for( int char_idx = 0; char_idx <= max_unicode_char; ++char_idx )
 		{
 			render_list.push_back( char_idx );
 		}
-		//	find the perfect size
-		printf( "\nDetermining ideal font pixel size: " );
-		std::vector< sdf_glyph > all_glyphs;
-		//	initial guess for the size of the Signed Distance Field font
-		//	(intentionally low, the first trial will be at sz*2, so 8x8)
-		int sz = 4;
-		bool keep_going = true;
-		while( keep_going )
+	}
+	//	find the perfect size
+	printf( "\nDetermining ideal font pixel size: " );
+	std::vector< sdf_glyph > all_glyphs;
+	//	initial guess for the size of the Signed Distance Field font
+	//	(intentionally low, the first trial will be at sz*2, so 8x8)
+	int sz = 4;
+	bool keep_going = true;
+	while( keep_going )
+	{
+		sz <<= 1;
+		printf( " %i", sz );
+		keep_going = gen_pack_list( ft_face, sz, texture_size, render_list, all_glyphs );
+	}
+	int sz_step = sz >> 2;
+	while( sz_step )
+	{
+		if( keep_going )
 		{
-			sz <<= 1;
-			printf( " %i", sz );
-			keep_going = gen_pack_list( ft_face, sz, texture_size, render_list, all_glyphs );
-		}
-		int sz_step = sz >> 2;
-		while( sz_step )
+			sz += sz_step;
+		} else
 		{
-			if( keep_going )
-			{
-				sz += sz_step;
-			} else
-			{
-				sz -= sz_step;
-			}
-			printf( " %i", sz );
-			sz_step >>= 1;
-			keep_going = gen_pack_list( ft_face, sz, texture_size, render_list, all_glyphs );
+			sz -= sz_step;
 		}
-		//	just in case
-		while( (!keep_going) && (sz > 1) )
-		{
-			--sz;
-			printf( " %i", sz );
-			keep_going = gen_pack_list( ft_face, sz, texture_size, render_list, all_glyphs );
-		}
-		printf( "\nResult = %i pixels\n", sz );
+		printf( " %i", sz );
+		sz_step >>= 1;
+		keep_going = gen_pack_list( ft_face, sz, texture_size, render_list, all_glyphs );
+	}
+	//	just in case
+	while( (!keep_going) && (sz > 1) )
+	{
+		--sz;
+		printf( " %i", sz );
+		keep_going = gen_pack_list( ft_face, sz, texture_size, render_list, all_glyphs );
+	}
+	printf( "\nResult = %i pixels\n", sz );
 
-		if( !keep_going )
-		{
-			printf( "The data will not fit in a texture %i^2\n", texture_size );
-			system( "pause" );
-			return -1;
-		}
+	if( !keep_going )
+	{
+		printf( "The data will not fit in a texture %i^2\n", texture_size );
+		system( "pause" );
+		return -1;
+	}
 
-		//	set up the RAM for the final rendering/compositing
-		//	(use all four channels, so PNG compression is simple)
-		std::vector<unsigned char> pdata( 4 * texture_size * texture_size, 0 );
+	//	set up the RAM for the final rendering/compositing
+	//	(use all four channels, so PNG compression is simple)
+	std::vector<unsigned char> pdata( 4 * texture_size * texture_size, 0 );
 
-		//	render all the glyphs individually
-		printf( "\nRendering characters into a packed %i^2 image:\n", texture_size );
-		int packed_glyph_index = 0;
-		int tin = clock();
-		for( unsigned int char_index = 0; char_index < render_list.size(); ++char_index )
+	//	render all the glyphs individually
+	printf( "\nRendering characters into a packed %i^2 image:\n", texture_size );
+	int packed_glyph_index = 0;
+	int tin = clock();
+	for( unsigned int char_index = 0; char_index < render_list.size(); ++char_index )
+	{
+		int glyph_index = FT_Get_Char_Index( ft_face, render_list[char_index] );
+		if( glyph_index )
 		{
-			int glyph_index = FT_Get_Char_Index( ft_face, render_list[char_index] );
-			if( glyph_index )
+			ft_err = FT_Load_Glyph( ft_face, glyph_index, 0 );
+			if( !ft_err )
 			{
-				ft_err = FT_Load_Glyph( ft_face, glyph_index, 0 );
+				ft_err = FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO );
 				if( !ft_err )
 				{
-					ft_err = FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO );
-					if( !ft_err )
+					//	we have the glyph, already rendered, get the data about it
+					int w = ft_face->glyph->bitmap.width;
+					int h = ft_face->glyph->bitmap.rows;
+					int p = ft_face->glyph->bitmap.pitch;
+
+					//	oversize the holding buffer so I can smooth it!
+					int sw = w + scaler * 4;
+					int sh = h + scaler * 4;
+					unsigned char *smooth_buf = new unsigned char[sw*sh];
+					for( int i = 0; i < sw*sh; ++i )
 					{
-						//	we have the glyph, already rendered, get the data about it
-						int w = ft_face->glyph->bitmap.width;
-						int h = ft_face->glyph->bitmap.rows;
-						int p = ft_face->glyph->bitmap.pitch;
-
-						//	oversize the holding buffer so I can smooth it!
-						int sw = w + scaler * 4;
-						int sh = h + scaler * 4;
-						unsigned char *smooth_buf = new unsigned char[sw*sh];
-						for( int i = 0; i < sw*sh; ++i )
-						{
-							smooth_buf[i] = 0;
-						}
-
-						//	copy the glyph into the buffer to be smoothed
-						unsigned char *buf = ft_face->glyph->bitmap.buffer;
-						for( int j = 0; j < h; ++j )
-						{
-							for( int i = 0; i < w; ++i )
-							{
-								smooth_buf[scaler*2+i+(j+scaler*2)*sw] = 255 * ((buf[j*p+(i>>3)] >> (7 - (i & 7))) & 1);
-							}
-						}
-						//	do the SDF
-						int sdfw = all_glyphs[packed_glyph_index].width;
-						int sdfx = all_glyphs[packed_glyph_index].x;
-						int sdfh = all_glyphs[packed_glyph_index].height;
-						int sdfy = all_glyphs[packed_glyph_index].y;
-						for( int j = 0; j < sdfh; ++j )
-						{
-							for( int i = 0; i < sdfw; ++i )
-							{
-								int pd_idx = (i+sdfx+(j+sdfy)*texture_size) * 4;
-								pdata[pd_idx] =
-									//get_SDF
-									get_SDF_radial
-											( smooth_buf, sw, sh,
-											i*scaler + (scaler >>1), j*scaler + (scaler >>1),
-											2*scaler );
-								pdata[pd_idx+1] = pdata[pd_idx];
-								pdata[pd_idx+2] = pdata[pd_idx];
-								pdata[pd_idx+3] = pdata[pd_idx];
-							}
-						}
-						++packed_glyph_index;
-
-						delete [] smooth_buf;
+						smooth_buf[i] = 0;
 					}
-					printf( "%i ", render_list[char_index] );
+
+					//	copy the glyph into the buffer to be smoothed
+					unsigned char *buf = ft_face->glyph->bitmap.buffer;
+					for( int j = 0; j < h; ++j )
+					{
+						for( int i = 0; i < w; ++i )
+						{
+							smooth_buf[scaler*2+i+(j+scaler*2)*sw] = 255 * ((buf[j*p+(i>>3)] >> (7 - (i & 7))) & 1);
+						}
+					}
+					//	do the SDF
+					int sdfw = all_glyphs[packed_glyph_index].width;
+					int sdfx = all_glyphs[packed_glyph_index].x;
+					int sdfh = all_glyphs[packed_glyph_index].height;
+					int sdfy = all_glyphs[packed_glyph_index].y;
+					for( int j = 0; j < sdfh; ++j )
+					{
+						for( int i = 0; i < sdfw; ++i )
+						{
+							int pd_idx = (i+sdfx+(j+sdfy)*texture_size) * 4;
+							pdata[pd_idx] =
+								//get_SDF
+								get_SDF_radial
+										( smooth_buf, sw, sh,
+										i*scaler + (scaler >>1), j*scaler + (scaler >>1),
+										2*scaler );
+							pdata[pd_idx+1] = pdata[pd_idx];
+							pdata[pd_idx+2] = pdata[pd_idx];
+							pdata[pd_idx+3] = pdata[pd_idx];
+						}
+					}
+					++packed_glyph_index;
+
+					delete [] smooth_buf;
 				}
+				printf( "%i ", render_list[char_index] );
 			}
 		}
-		tin = clock() - tin;
-		printf( "\nRenderint took %1.3f seconds\n\n", 0.001f * tin );
+	}
+	tin = clock() - tin;
+	printf( "\nRenderint took %1.3f seconds\n\n", 0.001f * tin );
 
-		printf( "\nCompressing the image to PNG\n" );
-		tin = save_png_SDFont(
+	printf( "\nCompressing the image to PNG\n" );
+	tin = save_png_SDFont(
+			font_file, ft_face->family_name,
+			texture_size, texture_size,
+			pdata, all_glyphs, char_map, sz );
+	printf( "Done in %1.3f seconds\n\n", 0.001f * tin );
+
+	if( export_c_header )
+	{
+		printf( "Saving the SDF data in a C header file\n" );
+		tin = save_c_header_SDFont(
 				font_file, ft_face->family_name,
 				texture_size, texture_size,
 				pdata, all_glyphs );
 		printf( "Done in %1.3f seconds\n\n", 0.001f * tin );
-
-		if( export_c_header )
-		{
-			printf( "Saving the SDF data in a C header file\n" );
-			tin = save_c_header_SDFont(
-					font_file, ft_face->family_name,
-					texture_size, texture_size,
-					pdata, all_glyphs );
-			printf( "Done in %1.3f seconds\n\n", 0.001f * tin );
-		}
-
-		//	clean up my data
-		all_glyphs.clear();
-		pdata.clear();
-
-		ft_err = FT_Done_Face( ft_face );
 	}
+
+	//	clean up my data
+	all_glyphs.clear();
+	pdata.clear();
+	ft_err = FT_Done_Face( ft_face );
+	
 	return true;
 }
 
@@ -458,7 +494,9 @@ int save_png_SDFont(
 		const char* font_name,
 		int img_width, int img_height,
 		const std::vector< unsigned char > &img_data,
-		const std::vector< sdf_glyph > &packed_glyphs )
+		std::vector< sdf_glyph > &packed_glyphs,
+		const std::map<int, int> & char_map,
+		int font_size )
 {
 	//	save my image
 	int fn_size = strlen( orig_filename ) + 100;
@@ -473,29 +511,48 @@ int save_png_SDFont(
 	encoder.encode( buffer, img_data.empty() ? 0 : &img_data[0], img_width, img_height );
 	LodePNG::saveFile( buffer, fn );
 	tin = clock() - tin;
+	
+	// remap from unicode to codepage, get font height
+	float ymax = 0, ymin = 0;
+	if( char_map.size() != 0 )
+	{
+		for( unsigned int i = 0; i < packed_glyphs.size(); ++i )
+		{
+			std::map<int, int>::const_iterator id;
+			if( (id = char_map.find(packed_glyphs[i].ID)) != char_map.end() )
+			{
+				packed_glyphs[i].ID = id->second;
+				float ymaxi = packed_glyphs[i].yoff;
+				float ymini = packed_glyphs[i].yoff - packed_glyphs[i].height;
+				if (ymax < ymaxi) ymax = ymaxi;
+				if (ymin > ymini) ymin = ymini;
+			}
+		}
+	}
 
 	//	now save the acompanying info
 	sprintf( fn, "%s_sdf.txt", orig_filename );
 	FILE *fp = fopen( fn, "w" );
 	if( fp )
 	{
-		fprintf( fp, "info face=\"%s\"\n",
-				font_name  );
-		fprintf( fp, "chars count=%i\n", packed_glyphs.size() );
+		fprintf( fp, "info face=\"%s\"\n", font_name  );
+		fprintf( fp, "size=%i\n", font_size );
+		fprintf( fp, "line_height=%2.0f\n", ymax - ymin );
+		fprintf( fp, "chars count=%zu\n", packed_glyphs.size() );
 		for( unsigned int i = 0; i < packed_glyphs.size(); ++i )
-		{
+		{		
 			fprintf( fp, "char id=%-6ix=%-6iy=%-6iwidth=%-6iheight=%-6i",
 				packed_glyphs[i].ID,
 				packed_glyphs[i].x,
 				packed_glyphs[i].y,
 				packed_glyphs[i].width,
-				packed_glyphs[i].height
-				);
+				packed_glyphs[i].height );
+			
 			fprintf( fp, "xoffset=%-10.3fyoffset=%-10.3fxadvance=%-10.3f",
 				packed_glyphs[i].xoff,
 				packed_glyphs[i].yoff,
-				packed_glyphs[i].xadv
-				);
+				packed_glyphs[i].xadv );
+			
 			fprintf( fp, "  page=0  chnl=0\n" );
 		}
 		fclose( fp );
@@ -535,7 +592,7 @@ int save_c_header_SDFont(
 		fprintf( fp, "/* array size information */\n" );
 		fprintf( fp, "const int sdf_tex_width = %i;\n", img_width );
 		fprintf( fp, "const int sdf_tex_height = %i;\n", img_height );
-		fprintf( fp, "const int sdf_num_chars = %i;\n", packed_glyphs.size() );
+		fprintf( fp, "const int sdf_num_chars = %zu;\n", packed_glyphs.size() );
 		fprintf( fp, "/* 'unsigned char sdf_data[]' is defined last */\n" );
 		fprintf( fp, "\n" );
 
@@ -623,9 +680,13 @@ bool gen_pack_list(
 		const std::vector< int > &render_list,
 		std::vector< sdf_glyph > &packed_glyphs )
 {
+	//const int glyph_padding = 0;//(pixel_size / 16) > 1 ? (pixel_size / 16) : 1;
+	//printf("padding: %i\n", glyph_padding);
+	
 	int ft_err;
 	packed_glyphs.clear();
 	ft_err = FT_Set_Pixel_Sizes( ft_face, pixel_size*scaler, 0 );
+	
 	std::vector< int > rectangle_info;
 	std::vector< std::vector<int> > packed_glyph_info;
 	for( unsigned int char_index = 0; char_index < render_list.size(); ++char_index )
@@ -674,6 +735,7 @@ bool gen_pack_list(
 			}
 		}
 	}
+	
 	const bool dont_allow_rotation = false;
 	BinPacker bp;
 	bp.Pack( rectangle_info, packed_glyph_info, pack_tex_size, dont_allow_rotation );
@@ -686,8 +748,8 @@ bool gen_pack_list(
 		{
 			//	index, x, y, rotated
 			unsigned int idx = packed_glyph_info[0][i+0];
-			packed_glyphs[idx].x = packed_glyph_info[0][i+1];
-			packed_glyphs[idx].y = packed_glyph_info[0][i+2];
+			packed_glyphs[idx].x = packed_glyph_info[0][i+1];// + glyph_padding;
+			packed_glyphs[idx].y = packed_glyph_info[0][i+2];// + glyph_padding;
 		}
 		return true;
 	}
