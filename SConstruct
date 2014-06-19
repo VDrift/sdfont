@@ -10,7 +10,9 @@ env.Append(CPPPATH = ['/usr/include/freetype2'])
 list = Split("""main.cpp
 	stb_image.c
 	BinPacker.cpp
-	lodepng.cpp""")
+	lodepng.cpp
+	EncodingHelper.cpp
+	""")
 
 list.sort(lambda x, y: cmp(x.lower(),y.lower()))
 

@@ -10,6 +10,7 @@
 #include FT_GLYPH_H
 
 #include "BinPacker.hpp"
+#include "EncodingHelper.hpp"
 #include "lodepng.h"
 #include "stb_image.h"
 
@@ -65,6 +66,14 @@ int save_c_header_SDFont(
 		const std::vector< unsigned char > &img_data,
 		const std::vector< sdf_glyph > &packed_glyphs );
 
+int map_char_id(
+		int char_id, 
+		FT_Encoding encoding );
+
+int load_glyph( 
+		FT_Face &ft_face,
+		int char_id );
+
 //	number of rendered pixels per SDF pixel
 const int scaler = 16;
 //	(larger value means higher quality, up to a point)
@@ -76,13 +85,24 @@ int main( int argc, char **argv )
 	printf( "\n" );
 	if( argc < 2 )
 	{
-		printf( "No good, I need a font file!\n" );
+		printf( "usage: sdfont <fontfile.ttf>\n" );
+		printf( "usage: sdfont <fontfile.ttf> <encoding.txt>\n" );
+		printf( "usage: sdfont <fontfile.ttf> <encoding.txt> <size:64..4096>\n" );
 		system( "pause" );
 		return -1;
 	}
 
 	int texture_size = -1;	//	trigger a request
 	bool export_c_header = false;
+
+	if( argc >= 4 )
+	{
+		int argvSize = 0;
+		if( sscanf( argv[3], "%i", &argvSize ) == 1 )
+		{
+			texture_size = argvSize;
+		}
+	}
 
 	if( texture_size < 64 )
 	{
@@ -116,7 +136,7 @@ int main( int argc, char **argv )
 	if( !render_signed_distance_image( argv[1], texture_size, export_c_header ) )
 	{
 		//	didn't work, try the font
-		const char * map_file = (argc == 3) ? argv[2] : NULL;
+		const char * map_file = (argc >= 3) ? argv[2] : NULL;
 		render_signed_distance_font( ft_lib, argv[1], map_file, texture_size, export_c_header );
 	}
 
@@ -348,6 +368,7 @@ bool render_signed_distance_font(
 			render_list.push_back( char_idx );
 		}
 	}
+
 	//	find the perfect size
 	printf( "\nDetermining ideal font pixel size: " );
 	std::vector< sdf_glyph > all_glyphs;
@@ -401,16 +422,11 @@ bool render_signed_distance_font(
 	int packed_glyph_index = 0;
 	for( unsigned int char_index = 0; char_index < render_list.size(); ++char_index )
 	{
-		int char_id = render_list[char_index];
-		int glyph_index = FT_Get_Char_Index( ft_face, char_id );
-		if( glyph_index == 0 ||
-			FT_Load_Glyph( ft_face, glyph_index, 0 ) ||
-			FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO ) )
+		int char_id = load_glyph( ft_face, render_list[char_index]);
+		if( char_id < 0 )
 		{
 			continue;
 		}
-
-		assert(all_glyphs[packed_glyph_index].ID == char_id);
 		
 		int w = ft_face->glyph->bitmap.width;
 		int h = ft_face->glyph->bitmap.rows;
@@ -672,6 +688,46 @@ int save_c_header_SDFont(
 	return tin;
 }
 
+int map_char_id(
+		int char_id, 
+		FT_Encoding encoding )
+{
+	if( encoding == FT_ENCODING_APPLE_ROMAN )
+	{
+		return unicode_to_apple_roman(char_id);
+	}
+
+	return char_id;
+}
+
+int load_glyph( 
+		FT_Face &ft_face,
+		int char_id )
+{
+	for( int i = 0; i < ft_face->num_charmaps; ++i )
+	{
+		int mapped_char_id = map_char_id( char_id, ft_face->charmap->encoding );
+		int glyph_index = FT_Get_Char_Index( ft_face, mapped_char_id );
+		if( glyph_index == 0 ||
+			FT_Load_Glyph( ft_face, glyph_index, 0 ) || 
+			FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO ) )
+		{
+			int charmap_index = FT_Get_Charmap_Index( ft_face->charmap );
+			charmap_index = ( charmap_index + 1 ) % ft_face->num_charmaps;
+			FT_Set_Charmap( ft_face, ft_face->charmaps[charmap_index] );
+			continue;
+		}
+		else
+		{
+			return mapped_char_id;
+		}
+	}
+
+	printf("Failed loading glyph: 0x%x\n", char_id);
+	return -1;
+}
+
+
 bool gen_pack_list(
 		FT_Face &ft_face,
 		int pixel_size,
@@ -682,16 +738,13 @@ bool gen_pack_list(
 	int ft_err;
 	packed_glyphs.clear();
 	ft_err = FT_Set_Pixel_Sizes( ft_face, pixel_size * scaler, 0 );
-	
+
 	std::vector< int > rectangle_info;
 	std::vector< std::vector<int> > packed_glyph_info;
 	for( unsigned int char_index = 0; char_index < render_list.size(); ++char_index )
 	{
-		int char_id = render_list[char_index];
-		int glyph_index = FT_Get_Char_Index( ft_face, char_id );
-		if( glyph_index == 0 ||
-			FT_Load_Glyph( ft_face, glyph_index, 0 ) || 
-			FT_Render_Glyph( ft_face->glyph, FT_RENDER_MODE_MONO ) )
+		int char_id = load_glyph(ft_face, render_list[char_index]);
+		if( char_id < 0 )
 		{
 			continue;
 		}
